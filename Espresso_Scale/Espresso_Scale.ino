@@ -226,6 +226,9 @@ void readButton() {
         extractStartWeight = readWeight();
         extractStartTime = millis();
         lastWeightChangeTime = millis();
+
+        sendDataViaBLE(extractStartWeight, 0, 0);  // coffe bean wight when flow=0, time=0
+
         Serial.println("Extraction start");
         buttonHandled = true;
       }
