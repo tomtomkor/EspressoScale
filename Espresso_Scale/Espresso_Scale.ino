@@ -50,6 +50,8 @@ float extractStartWeight = 0;
 float lastWeight = 0;
 unsigned long lastWeightChangeTime = 0;
 unsigned long extractStartTime = 0;
+float lastFilteredWeight = 0;      // for flow detection filter
+bool firstExtractSample = true;    // first sample after extraction start
 
 // Scale calibration
 float calibrationFactor = 1.0;
@@ -82,7 +84,7 @@ void setup() {
   setupDisplay();
   setupBLE();
   
-  // HX711 초기화
+  // HX711
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibrationFactor);
   
@@ -99,7 +101,6 @@ void loop() {
   float currentWeight = readWeight();
   static unsigned long lastTime = millis();
   static float lastWeightForFlow = currentWeight;
-  static float lastFilteredWeight = 0;
   
   unsigned long now = millis();
   unsigned long deltaTime = now - lastTime;
@@ -109,13 +110,7 @@ void loop() {
     
     switch (currentMode) {
       case MODE_NORMAL:
-        if (currentWeight > 0.5) {  // extraction start
-          currentMode = MODE_EXTRACT;
-          extractStartWeight = currentWeight;
-          extractStartTime = now;
-          lastWeightChangeTime = now;
-          Serial.println("Extraction started");
-        }
+        // Automatic extraction start removed – only manual via button
         updateNormalDisplay(currentWeight);
         break;
         
@@ -124,13 +119,20 @@ void loop() {
           unsigned long elapsed = (now - extractStartTime) / 1000;
           float netWeight = currentWeight - extractStartWeight;
           
-          // if a significant wight change detected
+          // Filtered weight for noise reduction
           float filteredWeight = 0.8 * currentWeight + 0.2 * lastWeight;
+          
+          // Initialize lastFilteredWeight on first sample
+          if (firstExtractSample) {
+            lastFilteredWeight = filteredWeight;
+            firstExtractSample = false;
+          }
+          
+          // Detect significant weight change (flow)
           if (abs(filteredWeight - lastFilteredWeight) > 0.15) {
             lastWeightChangeTime = now;
           }
-          
-          lastFilteredWeight = filteredWeight; 
+          lastFilteredWeight = filteredWeight;
           
           // automatic termination
           bool noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
@@ -149,6 +151,7 @@ void loop() {
         break;
         
       case MODE_CALIB:
+        // Calibration is handled inside enterCalibrationMode()
         break;
     }
     
@@ -217,19 +220,23 @@ void readButton() {
     unsigned long holdTime = millis() - buttonPressStart;
     
     if (!buttonHandled) {
+      // --- Calibration (long press: 5 seconds) ---
       if (holdTime >= CALIB_HOLD_TIME && currentMode != MODE_CALIB) {
         enterCalibrationMode();
         buttonHandled = true;
       } 
+      // --- Extraction start (2 seconds, only in NORMAL mode) ---
       else if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL) {
         currentMode = MODE_EXTRACT;
         extractStartWeight = readWeight();
         extractStartTime = millis();
         lastWeightChangeTime = millis();
-
-        sendDataViaBLE(extractStartWeight, 0, 0);  // coffe bean wight when flow=0, time=0
-
-        Serial.println("Extraction start");
+        // Reset flow detection filter for the new extraction
+        lastFilteredWeight = extractStartWeight;
+        firstExtractSample = true;
+        // Send bean weight to app (flow=0, time=0)
+        sendDataViaBLE(extractStartWeight, 0, 0);
+        Serial.println("Extraction start (manual)");
         buttonHandled = true;
       }
     }
@@ -237,9 +244,21 @@ void readButton() {
 }
 
 void processButtonAction(unsigned long holdTime) {
+  // Short press (0.5 to 2 seconds)
   if (holdTime >= TARE_HOLD_TIME && holdTime < EXTRACT_HOLD_TIME) {
     if (currentMode == MODE_NORMAL) {
       performTare();
+    } 
+    else if (currentMode == MODE_EXTRACT) {
+      // Manual stop of extraction
+      currentMode = MODE_NORMAL;
+      unsigned long elapsed = (millis() - extractStartTime) / 1000;
+      float netWeight = readWeight() - extractStartWeight;
+      Serial.print("Extraction manually stopped. Final: ");
+      Serial.println(netWeight);
+      sendDataViaBLE(netWeight, 0, elapsed);
+      updateNormalDisplay(readWeight());
+      buttonHandled = true;
     }
   }
 }
@@ -272,25 +291,56 @@ void performTare() {
 
 // ==================== Calibration ====================
 void enterCalibrationMode() {
+  // Temporarily store previous mode to restore later
+  DeviceMode previousMode = currentMode;
+  currentMode = MODE_CALIB;
+  
   display.clearDisplay();
-  display.println("Put 100g");
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("CALIBRATION");
+  display.setCursor(0, 16);
+  display.println("Place 100g weight");
   display.display();
   
-  // wait for 100g-wight
-  while(true) {
-    float raw = scale.get_value(5);
-    if (raw > 80 && raw < 120) {  // if it weighs between 80g and 120g
-      calibrationFactor = 100.0 / raw;
-      scale.set_scale(calibrationFactor);
-      
-      display.clearDisplay();
-      display.println("Done!");
-      display.display();
-      delay(1000);
-      break;
+  // Wait for stable reading near 100g
+  bool calibrated = false;
+  unsigned long startTime = millis();
+  while (!calibrated && (millis() - startTime < 30000)) { // 30 sec timeout
+    if (scale.is_ready()) {
+      float raw = scale.get_value(5); // average of 5 readings
+      // If raw value corresponds to roughly 80-120g (assuming initial factor ~1)
+      if (raw > 80 && raw < 120) {
+        calibrationFactor = 100.0 / raw;
+        scale.set_scale(calibrationFactor);
+        calibrated = true;
+        
+        display.clearDisplay();
+        display.setCursor(0, 0);
+        display.println("Calibration OK!");
+        display.setCursor(0, 20);
+        display.print("Factor: ");
+        display.println(calibrationFactor, 4);
+        display.display();
+        delay(2000);
+        break;
+      }
     }
-    delay(500);
+    delay(200);
   }
+  
+  if (!calibrated) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Calibration failed");
+    display.setCursor(0, 16);
+    display.println("Check weight");
+    display.display();
+    delay(2000);
+  }
+  
+  currentMode = previousMode;
+  updateNormalDisplay(readWeight());
 }
 
 // ==================== Display update ====================
@@ -324,14 +374,8 @@ void updateExtractDisplay(float weight, float flowRate, unsigned long elapsed) {
   display.print(flowRate, 2);
   display.println("g/s");
   
-  /* display.setCursor(0, 45);
-  if (flowRate < 1.0) {
-    display.print("Pre-infusion");
-  } else if (flowRate > 2.5) {
-    display.print("Too Fast!");
-  } else {
-    display.print("Extracting");
-  } */
+  display.setCursor(0, 45);
+  display.print("Tap to stop");  
   
   display.display();
 }
