@@ -3,7 +3,6 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <BLEDevice.h>
-//#include <BLEUtils.h>
 #include <BLEServer.h>
 
 // ==================== Pin mapping ====================
@@ -25,7 +24,7 @@
 
 // extraction termination condition
 #define NO_FLOW_TIMEOUT    30000  // no weight change for 30 seconds
-#define EXTRACT_TIMEOUT    80000  // total extraction time limit: 80 seconds
+#define EXTRACT_TIMEOUT    70000  // total extraction time limit: 70 seconds
 
 // BLE service
 #define SERVICE_UUID       "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -60,6 +59,18 @@ float calibrationFactor = 1.0;
 unsigned long buttonPressStart = 0;
 bool buttonPressed = false;
 bool buttonHandled = false;
+
+// BLE server callbacks for auto re-advertising after disconnect
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      Serial.println(">>> App Connected!");
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      Serial.println(">>> App Disconnected. Restarting Advertising...");
+      pServer->getAdvertising()->start();
+    }
+};
 
 // ==================== Function list ====================
 void setupHardware();
@@ -110,7 +121,6 @@ void loop() {
     
     switch (currentMode) {
       case MODE_NORMAL:
-        // Automatic extraction start removed – only manual via button
         updateNormalDisplay(currentWeight);
         break;
         
@@ -145,7 +155,13 @@ void loop() {
             sendDataViaBLE(netWeight, 0, elapsed);
           } else {
             updateExtractDisplay(netWeight, flowRate, elapsed);
-            sendDataViaBLE(netWeight, flowRate, elapsed);
+            
+            // Send BLE data every 0.5 seconds (500 ms) while measuring every 0.1s
+            static unsigned long lastSendTime = 0;
+            if (now - lastSendTime >= 500) {
+              sendDataViaBLE(netWeight, flowRate, elapsed);
+              lastSendTime = now;
+            }
           }
         }
         break;
@@ -188,6 +204,7 @@ void setupDisplay() {
 void setupBLE() {
   BLEDevice::init("Espresso Scale");
   BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
@@ -291,7 +308,6 @@ void performTare() {
 
 // ==================== Calibration ====================
 void enterCalibrationMode() {
-  // Temporarily store previous mode to restore later
   DeviceMode previousMode = currentMode;
   currentMode = MODE_CALIB;
   
@@ -303,13 +319,11 @@ void enterCalibrationMode() {
   display.println("Place 100g weight");
   display.display();
   
-  // Wait for stable reading near 100g
   bool calibrated = false;
   unsigned long startTime = millis();
   while (!calibrated && (millis() - startTime < 30000)) { // 30 sec timeout
     if (scale.is_ready()) {
-      float raw = scale.get_value(5); // average of 5 readings
-      // If raw value corresponds to roughly 80-120g (assuming initial factor ~1)
+      float raw = scale.get_value(5);
       if (raw > 80 && raw < 120) {
         calibrationFactor = 100.0 / raw;
         scale.set_scale(calibrationFactor);
@@ -383,7 +397,6 @@ void updateExtractDisplay(float weight, float flowRate, unsigned long elapsed) {
 // ==================== BLE data send ====================
 void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
   if (pCharacteristic == nullptr) return;
-  
   char buffer[64];
   snprintf(buffer, sizeof(buffer), "%.1f,%.2f,%lu", weight, flowRate, elapsed);
   pCharacteristic->setValue(buffer);
