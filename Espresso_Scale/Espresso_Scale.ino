@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <BLEDevice.h>
+#include <BLEUtils.h>
 #include <BLEServer.h>
 
 // ==================== Pin mapping ====================
