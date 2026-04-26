@@ -14,7 +14,7 @@
 
 // ==================== Constants ====================
 #define SCREEN_WIDTH       128
-#define SCREEN_HEIGHT      64
+#define SCREEN_HEIGHT      32
 #define OLED_ADDR          0x3C
 
 // button
@@ -357,17 +357,13 @@ void enterCalibrationMode() {
   updateNormalDisplay(readWeight());
 }
 
-// ==================== Display update ====================
+// ==================== Display update for 0.91" OLED ====================
 void updateNormalDisplay(float weight) {
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(0, 0);
   display.print(weight, 1);
   display.println(" g");
-  
-  display.setTextSize(1);
-  display.setCursor(0, 40);
-  display.println("Mode: Standby");
   display.display();
 }
 
@@ -376,21 +372,15 @@ void updateExtractDisplay(float weight, float flowRate, unsigned long elapsed) {
   display.setTextSize(1);
   
   display.setCursor(0, 0);
-  display.print("W: ");
+  display.print("W:");
   display.print(weight, 1);
-  display.print("g  ");
-  display.print("T: ");
-  display.print(elapsed);
-  display.println("s");
+  display.println(" g");
   
-  display.setCursor(0, 20);
-  display.print("Flow: ");
+  display.setCursor(0, 16);
+  display.print("F:");
   display.print(flowRate, 2);
-  display.println("g/s");
-  
-  display.setCursor(0, 45);
-  display.print("Tap to stop");  
-  
+  display.println(" g/s");
+ 
   display.display();
 }
 
