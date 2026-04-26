@@ -18,20 +18,17 @@
 #define SCREEN_HEIGHT      32
 #define OLED_ADDR          0x3C
 
-// button timing (ms)
 #define TARE_HOLD_TIME     500
 #define EXTRACT_HOLD_TIME  2000
 #define CALIB_HOLD_TIME    5000
 
-// extraction termination
-#define NO_FLOW_TIMEOUT    30000   // 30 sec
-#define EXTRACT_TIMEOUT    70000   // 70 sec
+#define NO_FLOW_TIMEOUT    30000
+#define EXTRACT_TIMEOUT    70000
 
-// display stability thresholds (easily adjustable)
-#define MIN_WEIGHT_FOR_STABLE  2.0    // grams (pre-infusion/blooming phase)
-#define STABLE_DURATION_MS     2000   // milliseconds (2 sec)
+#define MIN_WEIGHT_FOR_STABLE  2.0
+#define STABLE_DURATION_MS     2000
+#define SPIKE_LIMIT        1.0
 
-// BLE
 #define SERVICE_UUID       "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
@@ -44,7 +41,6 @@ BLECharacteristic *pCharacteristic;
 enum DeviceMode { MODE_NORMAL, MODE_EXTRACT, MODE_CALIB };
 DeviceMode currentMode = MODE_NORMAL;
 
-// extraction
 float extractStartWeight = 0;
 float lastWeight = 0;
 unsigned long lastWeightChangeTime = 0;
@@ -52,15 +48,12 @@ unsigned long extractStartTime = 0;
 float lastFilteredWeight = 0;
 bool firstExtractSample = true;
 
-// calibration
 float calibrationFactor = 1.0;
 
-// button
 unsigned long buttonPressStart = 0;
 bool buttonPressed = false;
 bool buttonHandled = false;
 
-// BLE callbacks
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) { Serial.println(">>> App Connected!"); }
     void onDisconnect(BLEServer* pServer) {
@@ -69,7 +62,6 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
-// function prototypes
 void setupHardware();
 void setupDisplay();
 void setupBLE();
@@ -84,7 +76,6 @@ float calculateFlowRate(float currentWeight, float lastWeight, unsigned long del
 void performTare();
 void enterCalibrationMode();
 
-// ==================== Setup ====================
 void setup() {
   Serial.begin(115200);
   Serial.println("ESP32-C3 Espresso Scale Starting...");
@@ -96,14 +87,13 @@ void setup() {
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibrationFactor);
   
+  performTare();  // auto tare on power-up
+  Serial.println("Auto tare done at startup");
+  
   Serial.println("Ready!");
-  display.println("Ready!");
-  display.display();
-  delay(1000);
   updateNormalDisplay(readWeight());
 }
 
-// ==================== Loop ====================
 void loop() {
   readButton();
   
@@ -126,7 +116,6 @@ void loop() {
         unsigned long elapsed = (now - extractStartTime) / 1000;
         float netWeight = currentWeight - extractStartWeight;
         
-        // flow detection filter
         float filteredWeight = 0.8 * currentWeight + 0.2 * lastWeight;
         if (firstExtractSample) {
           lastFilteredWeight = filteredWeight;
@@ -145,8 +134,8 @@ void loop() {
           Serial.print("Extraction ended. Final: ");
           Serial.println(netWeight);
           sendDataViaBLE(netWeight, 0, elapsed);
+          updateNormalDisplay(readWeight());
         } else {
-          // ----- Display update every 1 second -----
           static unsigned long lastDisplayUpdate = 0;
           static float lastDisplayWeight = 0;
           static unsigned long stableStart = 0;
@@ -154,10 +143,8 @@ void loop() {
           
           if (now - lastDisplayUpdate >= 1000) {
             float delta = netWeight - lastDisplayWeight;
-            
-            // Use configurable MIN_WEIGHT_FOR_STABLE
             if (netWeight < MIN_WEIGHT_FOR_STABLE) {
-              stable = false;   // pre-infusion/blooming: never mark as stable
+              stable = false;
             } else {
               if (abs(delta) < 0.2) {
                 if (!stable) {
@@ -168,19 +155,15 @@ void loop() {
                 stable = false;
               }
             }
-            
-            // Show final result after STABLE_DURATION_MS of stability
             if (stable && (now - stableStart >= STABLE_DURATION_MS)) {
               updateFinalDisplay(netWeight, elapsed);
             } else {
               updateExtractDisplay(netWeight);
             }
-            
             lastDisplayWeight = netWeight;
             lastDisplayUpdate = now;
           }
           
-          // BLE send every 0.5s
           static unsigned long lastSendTime = 0;
           if (now - lastSendTime >= 500) {
             sendDataViaBLE(netWeight, flowRate, elapsed);
@@ -202,7 +185,6 @@ void loop() {
   delay(10);
 }
 
-// ==================== Hardware & Display ====================
 void setupHardware() {
   pinMode(TOUCH_BUTTON_PIN, INPUT_PULLUP);
 }
@@ -224,8 +206,11 @@ void setupDisplay() {
 
 void updateNormalDisplay(float weight) {
   display.clearDisplay();
+  //display.setTextSize(1);
+  //display.setCursor(0, 0);
+  //display.print("[ Normal ]");
   display.setTextSize(2);
-  display.setCursor(0, 0);
+  display.setCursor(0, 10);
   display.print(weight, 1);
   display.println(" g");
   display.display();
@@ -233,8 +218,11 @@ void updateNormalDisplay(float weight) {
 
 void updateExtractDisplay(float netWeight) {
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.setCursor(0, 0);
+  display.print("[ Extraction ]");
+  display.setTextSize(2);
+  display.setCursor(0, 10);
   display.print(netWeight, 1);
   display.println(" g");
   display.display();
@@ -242,8 +230,11 @@ void updateExtractDisplay(float netWeight) {
 
 void updateFinalDisplay(float netWeight, unsigned long elapsed) {
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.setCursor(0, 0);
+  display.print("[ Final Result ]");
+  display.setTextSize(2);
+  display.setCursor(0, 8);
   display.print(netWeight, 1);
   display.println(" g");
   display.setTextSize(1);
@@ -254,7 +245,6 @@ void updateFinalDisplay(float netWeight, unsigned long elapsed) {
   display.display();
 }
 
-// ==================== BLE ====================
 void setupBLE() {
   BLEDevice::init("Espresso Scale");
   BLEServer *pServer = BLEDevice::createServer();
@@ -279,7 +269,6 @@ void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
   pCharacteristic->notify();
 }
 
-// ==================== Button Handling ====================
 void readButton() {
   bool reading = digitalRead(TOUCH_BUTTON_PIN) == LOW;
   if (reading && !buttonPressed) {
@@ -302,14 +291,15 @@ void readButton() {
         buttonHandled = true;
       } 
       else if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL) {
-        currentMode = MODE_EXTRACT;
-        extractStartWeight = readWeight();
+        performTare();  // tare before extraction
+        extractStartWeight = 0;
         extractStartTime = millis();
         lastWeightChangeTime = millis();
-        lastFilteredWeight = extractStartWeight;
+        lastFilteredWeight = 0;
         firstExtractSample = true;
-        sendDataViaBLE(extractStartWeight, 0, 0);
-        Serial.println("Extraction start (manual)");
+        currentMode = MODE_EXTRACT;
+        sendDataViaBLE(0, 0, 0);
+        Serial.println("Extraction start with auto-tare");
         buttonHandled = true;
       }
     }
@@ -322,6 +312,7 @@ void processButtonAction(unsigned long holdTime) {
       performTare();
     } 
     else if (currentMode == MODE_EXTRACT) {
+      // manual stop (just in case)
       currentMode = MODE_NORMAL;
       unsigned long elapsed = (millis() - extractStartTime) / 1000;
       float netWeight = readWeight() - extractStartWeight;
@@ -334,13 +325,18 @@ void processButtonAction(unsigned long holdTime) {
   }
 }
 
-// ==================== Measurement ====================
 float readWeight() {
-  if (scale.is_ready()) {
-    float raw = scale.get_units(5);
-    return (raw > 0 ? raw : 0);
+  if (!scale.is_ready()) return lastWeight;
+  
+  float raw = scale.get_units(5);
+  if (raw < 0) raw = 0;
+  
+  if (abs(raw - lastWeight) > SPIKE_LIMIT) {
+    Serial.println("Spike ignored");
+    return lastWeight;
   }
-  return lastWeight;
+  
+  return raw;
 }
 
 float calculateFlowRate(float currentWeight, float lastWeight, unsigned long deltaTime) {
@@ -353,14 +349,14 @@ void performTare() {
   scale.tare();
   Serial.println("Tare done");
   display.clearDisplay();
-  display.setCursor(20, 25);
-  display.println("Tare OK!");
+  display.setTextSize(1);
+  display.setCursor(20, 12);
+  display.println("Tare OK");
   display.display();
   delay(500);
   updateNormalDisplay(readWeight());
 }
 
-// ==================== Calibration ====================
 void enterCalibrationMode() {
   DeviceMode previousMode = currentMode;
   currentMode = MODE_CALIB;
@@ -368,9 +364,9 @@ void enterCalibrationMode() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("CALIBRATION");
+  display.println("[ CALIBRATION ]");
   display.setCursor(0, 16);
-  display.println("Place 100g weight");
+  display.println("Place 100g");
   display.display();
   
   bool calibrated = false;
