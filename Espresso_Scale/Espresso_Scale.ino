@@ -17,31 +17,30 @@
 #define SCREEN_HEIGHT      32
 #define OLED_ADDR          0x3C
 
-// button
+// button timing (ms)
 #define TARE_HOLD_TIME     500
 #define EXTRACT_HOLD_TIME  2000
 #define CALIB_HOLD_TIME    5000
 
-// extraction termination condition
-#define NO_FLOW_TIMEOUT    30000  // no weight change for 30 seconds
-#define EXTRACT_TIMEOUT    70000  // total extraction time limit: 70 seconds
+// extraction termination
+#define NO_FLOW_TIMEOUT    30000   // 30 sec
+#define EXTRACT_TIMEOUT    70000   // 70 sec
 
-// BLE service
+// display stability thresholds (easily adjustable)
+#define MIN_WEIGHT_FOR_STABLE  2.0    // grams (pre-infusion/blooming phase)
+#define STABLE_DURATION_MS     2000   // milliseconds (2 sec)
+
+// BLE
 #define SERVICE_UUID       "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-// ==================== object ====================
+// ==================== Objects ====================
 HX711 scale;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 BLECharacteristic *pCharacteristic;
 
-// ==================== variables ====================
-enum DeviceMode {
-  MODE_NORMAL,      // normal mode
-  MODE_EXTRACT,     // extraction mode
-  MODE_CALIB        // scale calibration mode (100-gram weight needed)
-};
-
+// ==================== Variables ====================
+enum DeviceMode { MODE_NORMAL, MODE_EXTRACT, MODE_CALIB };
 DeviceMode currentMode = MODE_NORMAL;
 
 // extraction
@@ -49,44 +48,42 @@ float extractStartWeight = 0;
 float lastWeight = 0;
 unsigned long lastWeightChangeTime = 0;
 unsigned long extractStartTime = 0;
-float lastFilteredWeight = 0;      // for flow detection filter
-bool firstExtractSample = true;    // first sample after extraction start
+float lastFilteredWeight = 0;
+bool firstExtractSample = true;
 
-// Scale calibration
+// calibration
 float calibrationFactor = 1.0;
 
-// touch button
+// button
 unsigned long buttonPressStart = 0;
 bool buttonPressed = false;
 bool buttonHandled = false;
 
-// BLE server callbacks for auto re-advertising after disconnect
+// BLE callbacks
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      Serial.println(">>> App Connected!");
-    };
-
+    void onConnect(BLEServer* pServer) { Serial.println(">>> App Connected!"); }
     void onDisconnect(BLEServer* pServer) {
       Serial.println(">>> App Disconnected. Restarting Advertising...");
       pServer->getAdvertising()->start();
     }
 };
 
-// ==================== Function list ====================
+// function prototypes
 void setupHardware();
 void setupDisplay();
 void setupBLE();
 void readButton();
 void processButtonAction(unsigned long holdTime);
 void updateNormalDisplay(float weight);
-void updateExtractDisplay(float weight, float flowRate, unsigned long elapsed);
+void updateExtractDisplay(float netWeight);
+void updateFinalDisplay(float netWeight, unsigned long elapsed);
 void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed);
 float readWeight();
 float calculateFlowRate(float currentWeight, float lastWeight, unsigned long deltaTime);
 void performTare();
 void enterCalibrationMode();
 
-// ==================== Main ====================
+// ==================== Setup ====================
 void setup() {
   Serial.begin(115200);
   Serial.println("ESP32-C3 Espresso Scale Starting...");
@@ -95,7 +92,6 @@ void setup() {
   setupDisplay();
   setupBLE();
   
-  // HX711
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibrationFactor);
   
@@ -106,6 +102,7 @@ void setup() {
   updateNormalDisplay(readWeight());
 }
 
+// ==================== Loop ====================
 void loop() {
   readButton();
   
@@ -116,7 +113,7 @@ void loop() {
   unsigned long now = millis();
   unsigned long deltaTime = now - lastTime;
   
-  if (deltaTime >= 100) {  // measure every 0.1 second
+  if (deltaTime >= 100) {
     float flowRate = calculateFlowRate(currentWeight, lastWeightForFlow, deltaTime);
     
     switch (currentMode) {
@@ -124,50 +121,75 @@ void loop() {
         updateNormalDisplay(currentWeight);
         break;
         
-      case MODE_EXTRACT:
-        {
-          unsigned long elapsed = (now - extractStartTime) / 1000;
-          float netWeight = currentWeight - extractStartWeight;
-          
-          // Filtered weight for noise reduction
-          float filteredWeight = 0.8 * currentWeight + 0.2 * lastWeight;
-          
-          // Initialize lastFilteredWeight on first sample
-          if (firstExtractSample) {
-            lastFilteredWeight = filteredWeight;
-            firstExtractSample = false;
-          }
-          
-          // Detect significant weight change (flow)
-          if (abs(filteredWeight - lastFilteredWeight) > 0.15) {
-            lastWeightChangeTime = now;
-          }
+      case MODE_EXTRACT: {
+        unsigned long elapsed = (now - extractStartTime) / 1000;
+        float netWeight = currentWeight - extractStartWeight;
+        
+        // flow detection filter
+        float filteredWeight = 0.8 * currentWeight + 0.2 * lastWeight;
+        if (firstExtractSample) {
           lastFilteredWeight = filteredWeight;
+          firstExtractSample = false;
+        }
+        if (abs(filteredWeight - lastFilteredWeight) > 0.15) {
+          lastWeightChangeTime = now;
+        }
+        lastFilteredWeight = filteredWeight;
+        
+        bool noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
+        bool timeout = elapsed > (EXTRACT_TIMEOUT / 1000);
+        
+        if (noFlow || timeout) {
+          currentMode = MODE_NORMAL;
+          Serial.print("Extraction ended. Final: ");
+          Serial.println(netWeight);
+          sendDataViaBLE(netWeight, 0, elapsed);
+        } else {
+          // ----- Display update every 1 second -----
+          static unsigned long lastDisplayUpdate = 0;
+          static float lastDisplayWeight = 0;
+          static unsigned long stableStart = 0;
+          static bool stable = false;
           
-          // automatic termination
-          bool noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
-          bool timeout = elapsed > (EXTRACT_TIMEOUT / 1000);
-          
-          if (noFlow || timeout) {
-            currentMode = MODE_NORMAL;
-            Serial.print("Extraction ended. Final: ");
-            Serial.println(netWeight);
-            sendDataViaBLE(netWeight, 0, elapsed);
-          } else {
-            updateExtractDisplay(netWeight, flowRate, elapsed);
+          if (now - lastDisplayUpdate >= 1000) {
+            float delta = netWeight - lastDisplayWeight;
             
-            // Send BLE data every 0.5 seconds (500 ms) while measuring every 0.1s
-            static unsigned long lastSendTime = 0;
-            if (now - lastSendTime >= 500) {
-              sendDataViaBLE(netWeight, flowRate, elapsed);
-              lastSendTime = now;
+            // Use configurable MIN_WEIGHT_FOR_STABLE
+            if (netWeight < MIN_WEIGHT_FOR_STABLE) {
+              stable = false;   // pre-infusion/blooming: never mark as stable
+            } else {
+              if (abs(delta) < 0.2) {
+                if (!stable) {
+                  stable = true;
+                  stableStart = now;
+                }
+              } else {
+                stable = false;
+              }
             }
+            
+            // Show final result after STABLE_DURATION_MS of stability
+            if (stable && (now - stableStart >= STABLE_DURATION_MS)) {
+              updateFinalDisplay(netWeight, elapsed);
+            } else {
+              updateExtractDisplay(netWeight);
+            }
+            
+            lastDisplayWeight = netWeight;
+            lastDisplayUpdate = now;
+          }
+          
+          // BLE send every 0.5s
+          static unsigned long lastSendTime = 0;
+          if (now - lastSendTime >= 500) {
+            sendDataViaBLE(netWeight, flowRate, elapsed);
+            lastSendTime = now;
           }
         }
         break;
-        
+      }
+      
       case MODE_CALIB:
-        // Calibration is handled inside enterCalibrationMode()
         break;
     }
     
@@ -179,12 +201,11 @@ void loop() {
   delay(10);
 }
 
-// ==================== HW initialization ====================
+// ==================== Hardware & Display ====================
 void setupHardware() {
   pinMode(TOUCH_BUTTON_PIN, INPUT_PULLUP);
 }
 
-// ==================== Display initialization ====================
 void setupDisplay() {
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
@@ -200,7 +221,39 @@ void setupDisplay() {
   display.display();
 }
 
-// ==================== BLE initialization ====================
+void updateNormalDisplay(float weight) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(weight, 1);
+  display.println(" g");
+  display.display();
+}
+
+void updateExtractDisplay(float netWeight) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(netWeight, 1);
+  display.println(" g");
+  display.display();
+}
+
+void updateFinalDisplay(float netWeight, unsigned long elapsed) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(netWeight, 1);
+  display.println(" g");
+  display.setTextSize(1);
+  display.setCursor(0, 24);
+  display.print("Time: ");
+  display.print(elapsed);
+  display.println(" s");
+  display.display();
+}
+
+// ==================== BLE ====================
 void setupBLE() {
   BLEDevice::init("Espresso Scale");
   BLEServer *pServer = BLEDevice::createServer();
@@ -217,10 +270,17 @@ void setupBLE() {
   Serial.println("BLE ready");
 }
 
-// ==================== Handling touches ====================
+void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
+  if (pCharacteristic == nullptr) return;
+  char buffer[64];
+  snprintf(buffer, sizeof(buffer), "%.1f,%.2f,%lu", weight, flowRate, elapsed);
+  pCharacteristic->setValue(buffer);
+  pCharacteristic->notify();
+}
+
+// ==================== Button Handling ====================
 void readButton() {
   bool reading = digitalRead(TOUCH_BUTTON_PIN) == LOW;
-  
   if (reading && !buttonPressed) {
     buttonPressed = true;
     buttonPressStart = millis();
@@ -235,23 +295,18 @@ void readButton() {
   }
   else if (reading && buttonPressed && !buttonHandled) {
     unsigned long holdTime = millis() - buttonPressStart;
-    
     if (!buttonHandled) {
-      // --- Calibration (long press: 5 seconds) ---
       if (holdTime >= CALIB_HOLD_TIME && currentMode != MODE_CALIB) {
         enterCalibrationMode();
         buttonHandled = true;
       } 
-      // --- Extraction start (2 seconds, only in NORMAL mode) ---
       else if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL) {
         currentMode = MODE_EXTRACT;
         extractStartWeight = readWeight();
         extractStartTime = millis();
         lastWeightChangeTime = millis();
-        // Reset flow detection filter for the new extraction
         lastFilteredWeight = extractStartWeight;
         firstExtractSample = true;
-        // Send bean weight to app (flow=0, time=0)
         sendDataViaBLE(extractStartWeight, 0, 0);
         Serial.println("Extraction start (manual)");
         buttonHandled = true;
@@ -261,13 +316,11 @@ void readButton() {
 }
 
 void processButtonAction(unsigned long holdTime) {
-  // Short press (0.5 to 2 seconds)
   if (holdTime >= TARE_HOLD_TIME && holdTime < EXTRACT_HOLD_TIME) {
     if (currentMode == MODE_NORMAL) {
       performTare();
     } 
     else if (currentMode == MODE_EXTRACT) {
-      // Manual stop of extraction
       currentMode = MODE_NORMAL;
       unsigned long elapsed = (millis() - extractStartTime) / 1000;
       float netWeight = readWeight() - extractStartWeight;
@@ -280,6 +333,7 @@ void processButtonAction(unsigned long holdTime) {
   }
 }
 
+// ==================== Measurement ====================
 float readWeight() {
   if (scale.is_ready()) {
     float raw = scale.get_units(5);
@@ -297,7 +351,6 @@ float calculateFlowRate(float currentWeight, float lastWeight, unsigned long del
 void performTare() {
   scale.tare();
   Serial.println("Tare done");
-  
   display.clearDisplay();
   display.setCursor(20, 25);
   display.println("Tare OK!");
@@ -321,14 +374,13 @@ void enterCalibrationMode() {
   
   bool calibrated = false;
   unsigned long startTime = millis();
-  while (!calibrated && (millis() - startTime < 30000)) { // 30 sec timeout
+  while (!calibrated && (millis() - startTime < 30000)) {
     if (scale.is_ready()) {
       float raw = scale.get_value(5);
       if (raw > 80 && raw < 120) {
         calibrationFactor = 100.0 / raw;
         scale.set_scale(calibrationFactor);
         calibrated = true;
-        
         display.clearDisplay();
         display.setCursor(0, 0);
         display.println("Calibration OK!");
@@ -355,40 +407,4 @@ void enterCalibrationMode() {
   
   currentMode = previousMode;
   updateNormalDisplay(readWeight());
-}
-
-// ==================== Display update for 0.91" OLED ====================
-void updateNormalDisplay(float weight) {
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(weight, 1);
-  display.println(" g");
-  display.display();
-}
-
-void updateExtractDisplay(float weight, float flowRate, unsigned long elapsed) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  
-  display.setCursor(0, 0);
-  display.print("W:");
-  display.print(weight, 1);
-  display.println(" g");
-  
-  display.setCursor(0, 16);
-  display.print("F:");
-  display.print(flowRate, 2);
-  display.println(" g/s");
- 
-  display.display();
-}
-
-// ==================== BLE data send ====================
-void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
-  if (pCharacteristic == nullptr) return;
-  char buffer[64];
-  snprintf(buffer, sizeof(buffer), "%.1f,%.2f,%lu", weight, flowRate, elapsed);
-  pCharacteristic->setValue(buffer);
-  pCharacteristic->notify();
 }
