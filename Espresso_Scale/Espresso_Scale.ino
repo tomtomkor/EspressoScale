@@ -10,12 +10,10 @@
 #define LOADCELL_DOUT_PIN  2
 #define LOADCELL_SCK_PIN   3
 #define TOUCH_BUTTON_PIN   5
-#define OLED_SDA           6
-#define OLED_SCL           7
 
 // ==================== Constants ====================
 #define SCREEN_WIDTH       128
-#define SCREEN_HEIGHT      32
+#define SCREEN_HEIGHT      64      // 0.96" OLED
 #define OLED_ADDR          0x3C
 
 #define TARE_HOLD_TIME     500
@@ -78,16 +76,25 @@ void enterCalibrationMode();
 
 void setup() {
   Serial.begin(115200);
+  delay(1000);
   Serial.println("ESP32-C3 Espresso Scale Starting...");
   
-  setupHardware();
+  // 1. OLED 초기화
   setupDisplay();
+  
+  // 2. 하드웨어 (버튼 핀)
+  setupHardware();
+  
+  // 3. BLE 초기화
   setupBLE();
   
+  // 4. HX711 초기화
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibrationFactor);
+  Serial.println("HX711 initialized successfully");
   
-  performTare();  // auto tare on power-up
+  // 5. 자동 테어링
+  performTare();
   Serial.println("Auto tare done at startup");
   
   Serial.println("Ready!");
@@ -187,30 +194,33 @@ void loop() {
 
 void setupHardware() {
   pinMode(TOUCH_BUTTON_PIN, INPUT_PULLUP);
+  Serial.println("Button pin configured");
 }
 
 void setupDisplay() {
-  Wire.begin(OLED_SDA, OLED_SCL);
+  delay(1000);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("SSD1306 allocation failed");
     for (;;);
   }
+  Serial.println("OLED initialized successfully");
   display.clearDisplay();
-  display.setTextSize(1);
+  display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.println("Espresso Scale");
   display.println("v1.0");
   display.display();
+  delay(1500);
 }
 
 void updateNormalDisplay(float weight) {
   display.clearDisplay();
-  //display.setTextSize(1);
-  //display.setCursor(0, 0);
-  //display.print("[ Normal ]");
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("[ Normal ]");
   display.setTextSize(2);
-  display.setCursor(0, 10);
+  display.setCursor(0, 20);
   display.print(weight, 1);
   display.println(" g");
   display.display();
@@ -222,7 +232,7 @@ void updateExtractDisplay(float netWeight) {
   display.setCursor(0, 0);
   display.print("[ Extraction ]");
   display.setTextSize(2);
-  display.setCursor(0, 10);
+  display.setCursor(0, 20);
   display.print(netWeight, 1);
   display.println(" g");
   display.display();
@@ -234,14 +244,14 @@ void updateFinalDisplay(float netWeight, unsigned long elapsed) {
   display.setCursor(0, 0);
   display.print("[ Final Result ]");
   display.setTextSize(2);
-  display.setCursor(0, 8);
+  display.setCursor(0, 20);
   display.print(netWeight, 1);
   display.println(" g");
   display.setTextSize(1);
-  display.setCursor(0, 24);
-  display.print("Time: ");
+  display.setCursor(0, 50);
+  display.print("Time:");
   display.print(elapsed);
-  display.println(" s");
+  display.print("s");
   display.display();
 }
 
@@ -258,7 +268,7 @@ void setupBLE() {
   pService->start();
   BLEAdvertising *pAdvertising = pServer->getAdvertising();
   pAdvertising->start();
-  Serial.println("BLE ready");
+  Serial.println("BLE initialized successfully");
 }
 
 void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
@@ -350,7 +360,7 @@ void performTare() {
   Serial.println("Tare done");
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(20, 12);
+  display.setCursor(20, 28);
   display.println("Tare OK");
   display.display();
   delay(500);
@@ -363,10 +373,10 @@ void enterCalibrationMode() {
   
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("[ CALIBRATION ]");
-  display.setCursor(0, 16);
-  display.println("Place 100g");
+  display.setCursor(0, 10);
+  display.println("CALIBRATION");
+  display.setCursor(0, 30);
+  display.println("Place 100g weight");
   display.display();
   
   bool calibrated = false;
@@ -379,9 +389,9 @@ void enterCalibrationMode() {
         scale.set_scale(calibrationFactor);
         calibrated = true;
         display.clearDisplay();
-        display.setCursor(0, 0);
+        display.setCursor(0, 10);
         display.println("Calibration OK!");
-        display.setCursor(0, 20);
+        display.setCursor(0, 30);
         display.print("Factor: ");
         display.println(calibrationFactor, 4);
         display.display();
@@ -394,9 +404,9 @@ void enterCalibrationMode() {
   
   if (!calibrated) {
     display.clearDisplay();
-    display.setCursor(0, 0);
+    display.setCursor(0, 20);
     display.println("Calibration failed");
-    display.setCursor(0, 16);
+    display.setCursor(0, 40);
     display.println("Check weight");
     display.display();
     delay(2000);
