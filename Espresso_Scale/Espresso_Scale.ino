@@ -79,21 +79,21 @@ void setup() {
   delay(1000);
   Serial.println("ESP32-C3 Espresso Scale Starting...");
   
-  // 1. OLED 초기화
+  // 1. OLED Initialization
   setupDisplay();
   
-  // 2. 하드웨어 (버튼 핀)
+  // 2. Touch sensor Initialization 
   setupHardware();
   
-  // 3. BLE 초기화
+  // 3. BLE Initialization
   setupBLE();
   
-  // 4. HX711 초기화
+  // 4. HX711 Initialization
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(calibrationFactor);
   Serial.println("HX711 initialized successfully");
   
-  // 5. 자동 테어링
+  // 5. Automatic taring
   performTare();
   Serial.println("Auto tare done at startup");
   
