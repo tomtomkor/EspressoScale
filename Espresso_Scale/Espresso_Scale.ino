@@ -16,19 +16,20 @@
 #define SCREEN_HEIGHT      64      // 0.96" OLED
 #define OLED_ADDR          0x3C
 
-#define TARE_HOLD_TIME     500
-#define EXTRACT_HOLD_TIME  2000
-#define CALIB_HOLD_TIME    5000
+#define TARE_HOLD_TIME     100      // 0.5 s
+#define EXTRACT_HOLD_TIME  2000     // 2 s
 
-#define NO_FLOW_TIMEOUT    30000
-#define EXTRACT_TIMEOUT    70000
+#define NO_FLOW_TIMEOUT    10000    
+#define EXTRACT_TIMEOUT    63000   
 
-#define MIN_WEIGHT_FOR_STABLE  2.0
+#define MIN_WEIGHT_FOR_STABLE  5.0
 #define STABLE_DURATION_MS     2000
-#define SPIKE_LIMIT        1.0
 
 #define SERVICE_UUID       "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// Fixed calibration factor (from separate test)
+#define CALIBRATION_FACTOR 1729.06f
 
 // ==================== Objects ====================
 HX711 scale;
@@ -36,7 +37,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 BLECharacteristic *pCharacteristic;
 
 // ==================== Variables ====================
-enum DeviceMode { MODE_NORMAL, MODE_EXTRACT, MODE_CALIB };
+enum DeviceMode { MODE_NORMAL, MODE_EXTRACT };
 DeviceMode currentMode = MODE_NORMAL;
 
 float extractStartWeight = 0;
@@ -45,8 +46,6 @@ unsigned long lastWeightChangeTime = 0;
 unsigned long extractStartTime = 0;
 float lastFilteredWeight = 0;
 bool firstExtractSample = true;
-
-float calibrationFactor = 1.0;
 
 unsigned long buttonPressStart = 0;
 bool buttonPressed = false;
@@ -72,28 +71,20 @@ void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed);
 float readWeight();
 float calculateFlowRate(float currentWeight, float lastWeight, unsigned long deltaTime);
 void performTare();
-void enterCalibrationMode();
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("ESP32-C3 Espresso Scale Starting...");
   
-  // 1. OLED Initialization
   setupDisplay();
-  
-  // 2. Touch sensor Initialization 
   setupHardware();
-  
-  // 3. BLE Initialization
   setupBLE();
   
-  // 4. HX711 Initialization
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  scale.set_scale(calibrationFactor);
-  Serial.println("HX711 initialized successfully");
+  scale.set_scale(CALIBRATION_FACTOR);
+  Serial.println("HX711 initialized with fixed calibration factor");
   
-  // 5. Automatic taring
   performTare();
   Serial.println("Auto tare done at startup");
   
@@ -115,15 +106,27 @@ void loop() {
     float flowRate = calculateFlowRate(currentWeight, lastWeightForFlow, deltaTime);
     
     switch (currentMode) {
-      case MODE_NORMAL:
-        updateNormalDisplay(currentWeight);
-        break;
+      
+      case MODE_NORMAL: {
+      updateNormalDisplay(currentWeight);
+    
+      static unsigned long lastAutoTare = 0;
+      unsigned long autoTareInterval = 10000;
+
+      if (millis() - lastAutoTare > autoTareInterval) {
+          if (abs(currentWeight) < 1.0) { 
+            scale.tare(); 
+          }
+          lastAutoTare = millis();
+      }
+      break;
+      }
         
       case MODE_EXTRACT: {
         unsigned long elapsed = (now - extractStartTime) / 1000;
         float netWeight = currentWeight - extractStartWeight;
         
-        float filteredWeight = 0.8 * currentWeight + 0.2 * lastWeight;
+        float filteredWeight = 0.7 * currentWeight + 0.3 * lastWeight;
         if (firstExtractSample) {
           lastFilteredWeight = filteredWeight;
           firstExtractSample = false;
@@ -133,7 +136,11 @@ void loop() {
         }
         lastFilteredWeight = filteredWeight;
         
-        bool noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
+        // check noFlow only if netWeight >= MIN_WEIGHT_FOR_STABLE
+        bool noFlow = false;
+        if (netWeight >= MIN_WEIGHT_FOR_STABLE) {
+          noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
+        }
         bool timeout = elapsed > (EXTRACT_TIMEOUT / 1000);
         
         if (noFlow || timeout) {
@@ -179,9 +186,6 @@ void loop() {
         }
         break;
       }
-      
-      case MODE_CALIB:
-        break;
     }
     
     lastWeightForFlow = currentWeight;
@@ -193,8 +197,8 @@ void loop() {
 }
 
 void setupHardware() {
-  pinMode(TOUCH_BUTTON_PIN, INPUT_PULLUP);
-  Serial.println("Button pin configured");
+  pinMode(TOUCH_BUTTON_PIN, INPUT_PULLDOWN);
+  Serial.println("Button pin configured (PULLDOWN, HIGH = pressed)");
 }
 
 void setupDisplay() {
@@ -207,52 +211,58 @@ void setupDisplay() {
   display.clearDisplay();
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Espresso Scale");
-  display.println("v1.0");
+  display.setCursor(5, 25);
+  display.println("Esso Scale");
   display.display();
   delay(1500);
 }
 
 void updateNormalDisplay(float weight) {
+  static float lastDisplayedWeight = -999.9;
+  if (abs(weight - lastDisplayedWeight) < 0.1) return;
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.print("[ Normal ]");
   display.setTextSize(2);
-  display.setCursor(0, 20);
+  display.setCursor(32, 28);
   display.print(weight, 1);
-  display.println(" g");
+  display.println("g");
   display.display();
+
+  lastDisplayedWeight = weight;
 }
 
 void updateExtractDisplay(float netWeight) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print("[ Extraction ]");
+  display.print("[ EXTRACTION ]");
   display.setTextSize(2);
-  display.setCursor(0, 20);
+  display.setCursor(32, 28);
   display.print(netWeight, 1);
-  display.println(" g");
+  display.println("g");
   display.display();
 }
 
 void updateFinalDisplay(float netWeight, unsigned long elapsed) {
+  currentMode = MODE_NORMAL;
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print("[ Final Result ]");
+  display.print("[ FINISHED ]");
   display.setTextSize(2);
-  display.setCursor(0, 20);
+  display.setCursor(32, 28);
   display.print(netWeight, 1);
-  display.println(" g");
+  display.println("g");
   display.setTextSize(1);
   display.setCursor(0, 50);
-  display.print("Time:");
+  display.print("Time: ");
   display.print(elapsed);
   display.print("s");
   display.display();
+  delay(5000);
 }
 
 void setupBLE() {
@@ -280,7 +290,7 @@ void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
 }
 
 void readButton() {
-  bool reading = digitalRead(TOUCH_BUTTON_PIN) == LOW;
+  bool reading = digitalRead(TOUCH_BUTTON_PIN) == HIGH;
   if (reading && !buttonPressed) {
     buttonPressed = true;
     buttonPressStart = millis();
@@ -292,46 +302,47 @@ void readButton() {
       processButtonAction(holdTime);
     }
     buttonPressed = false;
+    // 버튼 뗀 후 화면 갱신 (필요시)
+    if (currentMode == MODE_NORMAL) updateNormalDisplay(readWeight());
+    else if (currentMode == MODE_EXTRACT) updateExtractDisplay(readWeight() - extractStartWeight);
   }
   else if (reading && buttonPressed && !buttonHandled) {
     unsigned long holdTime = millis() - buttonPressStart;
-    if (!buttonHandled) {
-      if (holdTime >= CALIB_HOLD_TIME && currentMode != MODE_CALIB) {
-        enterCalibrationMode();
-        buttonHandled = true;
-      } 
-      else if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL) {
-        performTare();  // tare before extraction
-        extractStartWeight = 0;
-        extractStartTime = millis();
-        lastWeightChangeTime = millis();
-        lastFilteredWeight = 0;
-        firstExtractSample = true;
-        currentMode = MODE_EXTRACT;
-        sendDataViaBLE(0, 0, 0);
-        Serial.println("Extraction start with auto-tare");
-        buttonHandled = true;
-      }
+    // 긴 터치 (2초 이상) -> Normal 모드에서만 tare
+    if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL && !buttonHandled) {
+      buttonHandled = true;
+      performTare();
     }
   }
 }
 
 void processButtonAction(unsigned long holdTime) {
+  // 짧은 터치 (0.5~2초) -> 모드 토글 (Normal <-> Extract)
   if (holdTime >= TARE_HOLD_TIME && holdTime < EXTRACT_HOLD_TIME) {
     if (currentMode == MODE_NORMAL) {
-      performTare();
+      // Normal -> Extract: 자동 테어 후 추출 시작
+      performTare();                // 영점 조정
+      extractStartWeight = 0;       // 시작 무게 0
+      extractStartTime = millis();
+      lastWeightChangeTime = millis();
+      lastFilteredWeight = 0;
+      firstExtractSample = true;
+      currentMode = MODE_EXTRACT;
+      sendDataViaBLE(0, 0, 0);
+      Serial.println("Extraction started by mode toggle");
+      updateExtractDisplay(0);
     } 
     else if (currentMode == MODE_EXTRACT) {
-      // manual stop (just in case)
+      // Extract -> Normal: 추출 종료 및 결과 전송
       currentMode = MODE_NORMAL;
       unsigned long elapsed = (millis() - extractStartTime) / 1000;
       float netWeight = readWeight() - extractStartWeight;
-      Serial.print("Extraction manually stopped. Final: ");
+      Serial.print("Extraction stopped by mode toggle. Final: ");
       Serial.println(netWeight);
       sendDataViaBLE(netWeight, 0, elapsed);
       updateNormalDisplay(readWeight());
-      buttonHandled = true;
     }
+    buttonHandled = true;
   }
 }
 
@@ -340,11 +351,6 @@ float readWeight() {
   
   float raw = scale.get_units(5);
   if (raw < 0) raw = 0;
-  
-  if (abs(raw - lastWeight) > SPIKE_LIMIT) {
-    Serial.println("Spike ignored");
-    return lastWeight;
-  }
   
   return raw;
 }
@@ -356,62 +362,18 @@ float calculateFlowRate(float currentWeight, float lastWeight, unsigned long del
 }
 
 void performTare() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(35, 30);
+  display.println("TARING..."); 
+  display.display();
+  delay(500); 
   scale.tare();
   Serial.println("Tare done");
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(20, 28);
+  display.setTextSize(2);
+  display.setCursor(6, 25);
   display.println("Tare OK");
   display.display();
   delay(500);
-  updateNormalDisplay(readWeight());
-}
-
-void enterCalibrationMode() {
-  DeviceMode previousMode = currentMode;
-  currentMode = MODE_CALIB;
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 10);
-  display.println("CALIBRATION");
-  display.setCursor(0, 30);
-  display.println("Place 100g weight");
-  display.display();
-  
-  bool calibrated = false;
-  unsigned long startTime = millis();
-  while (!calibrated && (millis() - startTime < 30000)) {
-    if (scale.is_ready()) {
-      float raw = scale.get_value(5);
-      if (raw > 80 && raw < 120) {
-        calibrationFactor = 100.0 / raw;
-        scale.set_scale(calibrationFactor);
-        calibrated = true;
-        display.clearDisplay();
-        display.setCursor(0, 10);
-        display.println("Calibration OK!");
-        display.setCursor(0, 30);
-        display.print("Factor: ");
-        display.println(calibrationFactor, 4);
-        display.display();
-        delay(2000);
-        break;
-      }
-    }
-    delay(200);
-  }
-  
-  if (!calibrated) {
-    display.clearDisplay();
-    display.setCursor(0, 20);
-    display.println("Calibration failed");
-    display.setCursor(0, 40);
-    display.println("Check weight");
-    display.display();
-    delay(2000);
-  }
-  
-  currentMode = previousMode;
-  updateNormalDisplay(readWeight());
 }
