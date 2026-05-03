@@ -108,19 +108,30 @@ void loop() {
     switch (currentMode) {
       
       case MODE_NORMAL: {
-      updateNormalDisplay(currentWeight);
-    
-      static unsigned long lastAutoTare = 0;
-      unsigned long autoTareInterval = 10000;
+        static float displayedWeight = 0.0; 
+        float currentWeight = readWeight();
 
-      if (millis() - lastAutoTare > autoTareInterval) {
+        static unsigned long lastAutoTare = 0;
+        if (millis() - lastAutoTare > 10000) {
           if (abs(currentWeight) < 1.0) { 
-            scale.tare(); 
+              scale.tare(); 
+              currentWeight = 0.0; 
           }
           lastAutoTare = millis();
-      }
-      break;
-      }
+        }
+
+        float diff = abs(currentWeight - displayedWeight);
+        if (diff >= 0.3) {
+           displayedWeight = currentWeight;
+        } 
+   
+        if (abs(displayedWeight) < 0.3) {
+           displayedWeight = 0.0;
+        }
+
+        updateNormalDisplay(displayedWeight);
+        break;
+    }
         
       case MODE_EXTRACT: {
         unsigned long elapsed = (now - extractStartTime) / 1000;
