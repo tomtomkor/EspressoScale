@@ -42,6 +42,7 @@ DeviceMode currentMode = MODE_NORMAL;
 
 float extractStartWeight = 0;
 float lastWeight = 0;
+float lastFlowRate = 0;
 unsigned long lastWeightChangeTime = 0;
 unsigned long extractStartTime = 0;
 float lastFilteredWeight = 0;
@@ -109,10 +110,9 @@ void loop() {
       
       case MODE_NORMAL: {
         static float displayedWeight = 0.0; 
-        float currentWeight = readWeight();
 
         static unsigned long lastAutoTare = 0;
-        if (millis() - lastAutoTare > 10000) {
+        if (now - lastAutoTare > 10000) {
           if (abs(currentWeight) < 1.0) { 
               scale.tare(); 
               currentWeight = 0.0; 
@@ -288,6 +288,10 @@ void setupBLE() {
                     );
   pService->start();
   BLEAdvertising *pAdvertising = pServer->getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // 연결 간격 최적화 (iPhone 등과의 호환성)
+  pAdvertising->setMinPreferred(0x12);
   pAdvertising->start();
   Serial.println("BLE initialized successfully");
 }
@@ -367,9 +371,15 @@ float readWeight() {
 }
 
 float calculateFlowRate(float currentWeight, float lastWeight, unsigned long deltaTime) {
+  if (deltaTime <= 0) return lastFlowRate; 
   float deltaWeight = currentWeight - lastWeight;
   if (deltaWeight < 0) deltaWeight = 0;
-  return (deltaWeight / deltaTime) * 1000.0;
+
+  float rawFlowRate = (deltaWeight / (float)deltaTime) * 1000.0;
+  float filteredFlowRate = (rawFlowRate * 0.3) + (lastFlowRate * 0.7);
+  
+  lastFlowRate = filteredFlowRate;
+  return filteredFlowRate;
 }
 
 void performTare() {
