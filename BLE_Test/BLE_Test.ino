@@ -12,7 +12,6 @@ unsigned long lastSentSec = 0;
 bool isTesting = false;
 float virtualWeight = 0;
 
-// [추가] BLE 연결 상태를 관리하는 콜백 클래스
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       Serial.println(">>> App Connected!");
@@ -45,11 +44,11 @@ void setup() {
   pAdvertising->addServiceUUID(SERVICE_UUID); // 서비스 UUID 등록
   pAdvertising->start();
 
-  Serial.println("BLE Ready - 시리얼창에 's'를 치면 테스트를 시작합니다.");
+  Serial.println("BLE Ready - type in serial input 's'.");
 }
 
 void loop() {
-  // 시리얼 입력으로 시작 제어 (저울의 버튼을 누르는 동작 대신)
+  // serial iput 
   if (Serial.available() > 0) {
     char cmd = Serial.read();
     if (cmd == 's' || cmd == 'S') {
@@ -57,7 +56,7 @@ void loop() {
       lastSentSec = 0; 
       virtualWeight = 0;
       isTesting = true;
-      Serial.println(">>> 추출 테스트 시작 (0초부터)");
+      Serial.println(">>> test start");
     }
   }
 
@@ -66,48 +65,41 @@ void loop() {
     float seconds = (now - testStartTime) / 1000.0;
     unsigned long currentSec = (unsigned long)seconds;
 
-    // 1초마다 데이터 전송
     if (currentSec <= 70) {
       if (currentSec > lastSentSec || (currentSec == 0 && lastSentSec == 0)) {
         
-        // --- 에스프레소 유속 시뮬레이션 수식 ---
+        // --- espresso flow rate simulation ---
         float peakFlow = 3.9;
-        float peakTime = 45.0; // peakTime을 늘려 완만한 상승 유도
+        float peakTime = 45.0;
         float flow = 0;
 
         if (seconds > 0) {
           float ratio = seconds / peakTime; 
-          // Sine 기반 곡선: 0에서 우아하게 시작하여 peakFlow(3.9)를 넘지 않음
           flow = peakFlow * pow(sin(1.5708 * ratio), 3.0) * exp(1.0 - ratio);
         }
 
-        // 안전장치 및 최소값 컷오프
         if (flow < 0.05) flow = 0;
         if (flow > 3.9) flow = 3.9;
 
-        // 무게 누적
         virtualWeight += flow;
 
-        // BLE 전송 및 시리얼 출력
         sendDataViaBLE(virtualWeight, flow, currentSec);
         
         lastSentSec = currentSec; 
         Serial.printf("T: %lu, F: %.2f, W: %.1f\n", currentSec, flow, virtualWeight);
       }
     } else {
-      Serial.println(">>> 테스트 종료 (70초 도달)");
+      Serial.println(">>> test finished (70 seconds)");
       isTesting = false;
     }
   }
   
-  // BLE 스택의 안정성을 위해 루프 주기 조절
   delay(10); 
 }
 
 void sendDataViaBLE(float weight, float flowRate, unsigned long elapsed) {
   if (pCharacteristic == nullptr) return;
   char buffer[64];
-  // 앱인벤터에서 콤마(,)로 분리할 수 있게 포맷팅
   snprintf(buffer, sizeof(buffer), "%.1f,%.2f,%lu", weight, flowRate, elapsed);
   pCharacteristic->setValue(buffer);
   pCharacteristic->notify();
