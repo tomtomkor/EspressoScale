@@ -53,7 +53,10 @@ bool buttonPressed = false;
 bool buttonHandled = false;
 
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) { Serial.println(">>> App Connected!"); }
+    void onConnect(BLEServer* pServer) { 
+      Serial.println(">>> App Connected!"); 
+      pServer->getAdvertising()->stop();
+      }
     void onDisconnect(BLEServer* pServer) {
       Serial.println(">>> App Disconnected. Restarting Advertising...");
       pServer->getAdvertising()->start();
@@ -290,7 +293,7 @@ void setupBLE() {
   BLEAdvertising *pAdvertising = pServer->getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);  // 연결 간격 최적화 (iPhone 등과의 호환성)
+  pAdvertising->setMinPreferred(0x06);
   pAdvertising->setMinPreferred(0x12);
   pAdvertising->start();
   Serial.println("BLE initialized successfully");
@@ -317,13 +320,12 @@ void readButton() {
       processButtonAction(holdTime);
     }
     buttonPressed = false;
-    // 버튼 뗀 후 화면 갱신 (필요시)
     if (currentMode == MODE_NORMAL) updateNormalDisplay(readWeight());
     else if (currentMode == MODE_EXTRACT) updateExtractDisplay(readWeight() - extractStartWeight);
   }
   else if (reading && buttonPressed && !buttonHandled) {
     unsigned long holdTime = millis() - buttonPressStart;
-    // 긴 터치 (2초 이상) -> Normal 모드에서만 tare
+    // long touch (loner than 2 seconds) -> tare (only in normal mode)
     if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL && !buttonHandled) {
       buttonHandled = true;
       performTare();
@@ -332,12 +334,12 @@ void readButton() {
 }
 
 void processButtonAction(unsigned long holdTime) {
-  // 짧은 터치 (0.5~2초) -> 모드 토글 (Normal <-> Extract)
+  // short touch (0.5~2 seconds) -> mode toggle (Normal <-> Extract)
   if (holdTime >= TARE_HOLD_TIME && holdTime < EXTRACT_HOLD_TIME) {
     if (currentMode == MODE_NORMAL) {
-      // Normal -> Extract: 자동 테어 후 추출 시작
-      performTare();                // 영점 조정
-      extractStartWeight = 0;       // 시작 무게 0
+      // Normal -> Extract: auto tare
+      performTare();               
+      extractStartWeight = 0;       
       extractStartTime = millis();
       lastWeightChangeTime = millis();
       lastFilteredWeight = 0;
@@ -348,7 +350,7 @@ void processButtonAction(unsigned long holdTime) {
       updateExtractDisplay(0);
     } 
     else if (currentMode == MODE_EXTRACT) {
-      // Extract -> Normal: 추출 종료 및 결과 전송
+      // Extract -> Normal: end of extraction and send last data
       currentMode = MODE_NORMAL;
       unsigned long elapsed = (millis() - extractStartTime) / 1000;
       float netWeight = readWeight() - extractStartWeight;
