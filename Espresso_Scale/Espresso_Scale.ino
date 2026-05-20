@@ -20,7 +20,7 @@
 #define EXTRACT_HOLD_TIME  2000     // 2 s
 
 #define NO_FLOW_TIMEOUT    10000    
-#define EXTRACT_TIMEOUT    63000   
+#define EXTRACT_TIMEOUT    70000   
 
 #define MIN_WEIGHT_FOR_STABLE  5.0
 #define STABLE_DURATION_MS     2000
@@ -29,7 +29,7 @@
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 // Fixed calibration factor (from separate test)
-#define CALIBRATION_FACTOR 1729.06f
+#define CALIBRATION_FACTOR 1603.66f
 
 // ==================== Objects ====================
 HX711 scale;
@@ -100,115 +100,95 @@ void loop() {
   readButton();
   
   float currentWeight = readWeight();
-  static unsigned long lastTime = millis();
-  static float lastWeightForFlow = currentWeight;
-  
   unsigned long now = millis();
+  
+  static unsigned long lastTime = 0;
+  static float lastWeightForFlow = 0;
   unsigned long deltaTime = now - lastTime;
   
+  // 100ms마다 물리량 계산 및 모드별 로직 수행
   if (deltaTime >= 100) {
     float flowRate = calculateFlowRate(currentWeight, lastWeightForFlow, deltaTime);
     
     switch (currentMode) {
       
       case MODE_NORMAL: {
-        static float displayedWeight = 0.0; 
+        static float lockedWeight = 0.0;     
+        static float lastRawWeight = 0.0;    
 
-        static unsigned long lastAutoTare = 0;
-        if (now - lastAutoTare > 10000) {
-          if (abs(currentWeight) < 1.0) { 
-              scale.tare(); 
-              currentWeight = 0.0; 
-          }
-          lastAutoTare = millis();
-        }
+        // 1. 노이즈 1차 제거 (0.95 반영으로 속도감 개선)
+        float smoothWeight = (currentWeight * 0.95) + (lastRawWeight * 0.05);
+        lastRawWeight = smoothWeight;
 
-        float diff = abs(currentWeight - displayedWeight);
-        if (diff >= 0.3) {
-           displayedWeight = currentWeight;
-        } 
-   
-        if (abs(displayedWeight) < 0.3) {
-           displayedWeight = 0.0;
+        // 2. 추를 내렸을 때 (즉시 영점)
+        if (smoothWeight - lockedWeight < -30.0) { 
+          scale.tare();
+          lockedWeight = 0.0;
+          smoothWeight = 0.0;
         }
 
-        updateNormalDisplay(displayedWeight);
-        break;
-    }
-        
-      case MODE_EXTRACT: {
-        unsigned long elapsed = (now - extractStartTime) / 1000;
-        float netWeight = currentWeight - extractStartWeight;
-        
-        float filteredWeight = 0.7 * currentWeight + 0.3 * lastWeight;
-        if (firstExtractSample) {
-          lastFilteredWeight = filteredWeight;
-          firstExtractSample = false;
-        }
-        if (abs(filteredWeight - lastFilteredWeight) > 0.15) {
-          lastWeightChangeTime = now;
-        }
-        lastFilteredWeight = filteredWeight;
-        
-        // check noFlow only if netWeight >= MIN_WEIGHT_FOR_STABLE
-        bool noFlow = false;
-        if (netWeight >= MIN_WEIGHT_FOR_STABLE) {
-          noFlow = (now - lastWeightChangeTime) > NO_FLOW_TIMEOUT;
-        }
-        bool timeout = elapsed > (EXTRACT_TIMEOUT / 1000);
-        
-        if (noFlow || timeout) {
-          currentMode = MODE_NORMAL;
-          Serial.print("Extraction ended. Final: ");
-          Serial.println(netWeight);
-          sendDataViaBLE(netWeight, 0, elapsed);
-          updateNormalDisplay(readWeight());
+        // 3. 잠금 로직
+        float diff = abs(smoothWeight - lockedWeight);
+        if (lockedWeight == 0.0) {
+          if (diff > 1.5) lockedWeight = smoothWeight;
         } else {
-          static unsigned long lastDisplayUpdate = 0;
-          static float lastDisplayWeight = 0;
-          static unsigned long stableStart = 0;
-          static bool stable = false;
-          
-          if (now - lastDisplayUpdate >= 1000) {
-            float delta = netWeight - lastDisplayWeight;
-            if (netWeight < MIN_WEIGHT_FOR_STABLE) {
-              stable = false;
-            } else {
-              if (abs(delta) < 0.2) {
-                if (!stable) {
-                  stable = true;
-                  stableStart = now;
-                }
-              } else {
-                stable = false;
-              }
-            }
-            if (stable && (now - stableStart >= STABLE_DURATION_MS)) {
-              updateFinalDisplay(netWeight, elapsed);
-            } else {
-              updateExtractDisplay(netWeight);
-            }
-            lastDisplayWeight = netWeight;
-            lastDisplayUpdate = now;
+          if (diff > 1.0) lockedWeight = smoothWeight;
+        }
+
+        // 4. 장기 드리프트 청소 (3초 안정 시 타레)
+        static unsigned long stableTimer = 0;
+        if (abs(smoothWeight) < 2.0) {
+          if (stableTimer == 0) stableTimer = now;
+          if (now - stableTimer > 3000) {
+            scale.tare();
+            lockedWeight = 0.0;
+            stableTimer = 0;
           }
-          
-          static unsigned long lastSendTime = 0;
-          if (now - lastSendTime >= 500) {
-            sendDataViaBLE(netWeight, flowRate, elapsed);
-            lastSendTime = now;
-          }
+        } else {
+          stableTimer = 0;
+        }
+
+        // 5. 최종 표시
+        float displayOut = (abs(lockedWeight) < 0.5) ? 0.0 : lockedWeight;
+        updateNormalDisplay(displayOut);
+        break;
+      } // case MODE_NORMAL 종료
+
+      case MODE_EXTRACT: {
+        unsigned long elapsedMillis = now - extractStartTime;
+        unsigned long elapsedSec = elapsedMillis / 1000;
+        
+        float netWeight = currentWeight - extractStartWeight;
+        static float smoothNetWeight = 0.0;
+        smoothNetWeight = (netWeight * 0.3) + (smoothNetWeight * 0.7);
+
+        // 70초 타임아웃 종료
+        if (elapsedSec >= 70) {
+          currentMode = MODE_NORMAL;
+          sendDataViaBLE(netWeight, 0, elapsedSec);
+          break; 
+        }
+
+        // 앱 데이터 전송 (500ms 주기)
+        static unsigned long lastSendTime = 0;
+        if (now - lastSendTime >= 500) {
+          sendDataViaBLE(smoothNetWeight, flowRate, elapsedSec);
+          lastSendTime = now;
         }
         break;
-      }
-    }
-    
+      } // case MODE_EXTRACT 종료
+      
+    } // switch 종료
+
+    // 다음 flowRate 계산을 위해 상태 저장
     lastWeightForFlow = currentWeight;
     lastTime = now;
-  }
+    
+  } // if (deltaTime >= 100) 종료
   
-  lastWeight = currentWeight;
+  lastWeight = currentWeight; // 이전 루프 무게 저장용 (필요시)
   delay(10);
-}
+} // loop 종료
 
 void setupHardware() {
   pinMode(TOUCH_BUTTON_PIN, INPUT_PULLDOWN);
