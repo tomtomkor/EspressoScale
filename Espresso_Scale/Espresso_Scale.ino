@@ -169,10 +169,12 @@ void loop() {
           break; 
         }
 
-        // 앱 데이터 전송 (500ms 주기)
+        // 앱 데이터 전송 및 OLED 화면 갱신 (500ms 주기)
         static unsigned long lastSendTime = 0;
         if (now - lastSendTime >= 500) {
           sendDataViaBLE(smoothNetWeight, flowRate, elapsedSec);
+          updateExtractDisplay(smoothNetWeight); 
+          
           lastSendTime = now;
         }
         break;
@@ -300,12 +302,9 @@ void readButton() {
       processButtonAction(holdTime);
     }
     buttonPressed = false;
-    if (currentMode == MODE_NORMAL) updateNormalDisplay(readWeight());
-    else if (currentMode == MODE_EXTRACT) updateExtractDisplay(readWeight() - extractStartWeight);
   }
   else if (reading && buttonPressed && !buttonHandled) {
     unsigned long holdTime = millis() - buttonPressStart;
-    // long touch (loner than 2 seconds) -> tare (only in normal mode)
     if (holdTime >= EXTRACT_HOLD_TIME && currentMode == MODE_NORMAL && !buttonHandled) {
       buttonHandled = true;
       performTare();
