@@ -16,8 +16,8 @@
 #define SCREEN_HEIGHT      64      // 0.96" OLED
 #define OLED_ADDR          0x3C
 
-#define TARE_HOLD_TIME     100      // 0.5 s
-#define EXTRACT_HOLD_TIME  2000     // 2 s
+#define TARE_HOLD_TIME     100     
+#define EXTRACT_HOLD_TIME  2000     
 
 #define NO_FLOW_TIMEOUT    10000    
 #define EXTRACT_TIMEOUT    70000   
@@ -99,15 +99,13 @@ void setup() {
 void loop() {
   readButton();
   
-  float currentWeight = readWeight();
   unsigned long now = millis();
-  
   static unsigned long lastTime = 0;
   static float lastWeightForFlow = 0;
   unsigned long deltaTime = now - lastTime;
   
-  // 100ms마다 물리량 계산 및 모드별 로직 수행
   if (deltaTime >= 100) {
+    float currentWeight = readWeight();
     float flowRate = calculateFlowRate(currentWeight, lastWeightForFlow, deltaTime);
     
     switch (currentMode) {
@@ -116,18 +114,15 @@ void loop() {
         static float lockedWeight = 0.0;     
         static float lastRawWeight = 0.0;    
 
-        // 1. 노이즈 1차 제거 (0.95 반영으로 속도감 개선)
         float smoothWeight = (currentWeight * 0.95) + (lastRawWeight * 0.05);
         lastRawWeight = smoothWeight;
 
-        // 2. 추를 내렸을 때 (즉시 영점)
         if (smoothWeight - lockedWeight < -30.0) { 
           scale.tare();
           lockedWeight = 0.0;
           smoothWeight = 0.0;
         }
 
-        // 3. 잠금 로직
         float diff = abs(smoothWeight - lockedWeight);
         if (lockedWeight == 0.0) {
           if (diff > 1.5) lockedWeight = smoothWeight;
@@ -135,7 +130,6 @@ void loop() {
           if (diff > 1.0) lockedWeight = smoothWeight;
         }
 
-        // 4. 장기 드리프트 청소 (3초 안정 시 타레)
         static unsigned long stableTimer = 0;
         if (abs(smoothWeight) < 2.0) {
           if (stableTimer == 0) stableTimer = now;
@@ -152,7 +146,7 @@ void loop() {
         float displayOut = (abs(lockedWeight) < 0.5) ? 0.0 : lockedWeight;
         updateNormalDisplay(displayOut);
         break;
-      } // case MODE_NORMAL 종료
+      }
 
       case MODE_EXTRACT: {
         unsigned long elapsedMillis = now - extractStartTime;
@@ -160,16 +154,15 @@ void loop() {
         
         float netWeight = currentWeight - extractStartWeight;
         static float smoothNetWeight = 0.0;
-        smoothNetWeight = (netWeight * 0.3) + (smoothNetWeight * 0.7);
+        
+        smoothNetWeight = (netWeight * 0.5) + (smoothNetWeight * 0.5);
 
-        // 70초 타임아웃 종료
-        if (elapsedSec >= 70) {
+        if (elapsedSec >= 80) {
           currentMode = MODE_NORMAL;
           sendDataViaBLE(netWeight, 0, elapsedSec);
           break; 
         }
 
-        // 앱 데이터 전송 및 OLED 화면 갱신 (500ms 주기)
         static unsigned long lastSendTime = 0;
         if (now - lastSendTime >= 500) {
           sendDataViaBLE(smoothNetWeight, flowRate, elapsedSec);
@@ -178,19 +171,17 @@ void loop() {
           lastSendTime = now;
         }
         break;
-      } // case MODE_EXTRACT 종료
+      }
       
-    } // switch 종료
+    } 
 
-    // 다음 flowRate 계산을 위해 상태 저장
     lastWeightForFlow = currentWeight;
+    lastWeight = currentWeight;
     lastTime = now;
-    
-  } // if (deltaTime >= 100) 종료
+  }
   
-  lastWeight = currentWeight; // 이전 루프 무게 저장용 (필요시)
   delay(10);
-} // loop 종료
+}
 
 void setupHardware() {
   pinMode(TOUCH_BUTTON_PIN, INPUT_PULLDOWN);
@@ -313,12 +304,10 @@ void readButton() {
 }
 
 void processButtonAction(unsigned long holdTime) {
-  // short touch (0.5~2 seconds) -> mode toggle (Normal <-> Extract)
   if (holdTime >= TARE_HOLD_TIME && holdTime < EXTRACT_HOLD_TIME) {
     if (currentMode == MODE_NORMAL) {
-      // Normal -> Extract: auto tare
-      performTare();               
-      extractStartWeight = 0;       
+      performTare();              
+      extractStartWeight = 0;      
       extractStartTime = millis();
       lastWeightChangeTime = millis();
       lastFilteredWeight = 0;
@@ -329,7 +318,6 @@ void processButtonAction(unsigned long holdTime) {
       updateExtractDisplay(0);
     } 
     else if (currentMode == MODE_EXTRACT) {
-      // Extract -> Normal: end of extraction and send last data
       currentMode = MODE_NORMAL;
       unsigned long elapsed = (millis() - extractStartTime) / 1000;
       float netWeight = readWeight() - extractStartWeight;
@@ -345,7 +333,7 @@ void processButtonAction(unsigned long holdTime) {
 float readWeight() {
   if (!scale.is_ready()) return lastWeight;
   
-  float raw = scale.get_units(5);
+  float raw = scale.get_units(1);
   if (raw < 0) raw = 0;
   
   return raw;
