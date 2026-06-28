@@ -19,8 +19,8 @@
 #define TARE_HOLD_TIME     100     
 #define EXTRACT_HOLD_TIME  2000     
 
-#define NO_FLOW_TIMEOUT    10000    
-#define EXTRACT_TIMEOUT    70000   
+#define NO_FLOW_TIMEOUT    2000    
+#define EXTRACT_TIMEOUT    80000   
 
 #define MIN_WEIGHT_FOR_STABLE  5.0
 #define STABLE_DURATION_MS     2000
@@ -153,25 +153,65 @@ void loop() {
         unsigned long elapsedSec = elapsedMillis / 1000;
         
         float netWeight = currentWeight - extractStartWeight;
-        static float smoothNetWeight = 0.0;
         
-        smoothNetWeight = (netWeight * 0.5) + (smoothNetWeight * 0.5);
+        // ====================================================
+        // [수정 포인트 1] 저역통과필터 (LPF) 강화
+        // ====================================================
+        static float smoothNetWeight = 0.0;
+        // 기존 0.3 -> 0.1로 변경하여 가속에 의한 순간적인 무게 상승을 강력하게 억제
+        // 반응은 느려지지만, 더 정확한 "누적 무게" 추세에 집중합니다.
+        smoothNetWeight = (netWeight * 0.1) + (smoothNetWeight * 0.9);
 
-        if (elapsedSec >= 80) {
+        // ====================================================
+        // [수정 포인트 2] 유량(flow) 분석 및 추출 종료 판단
+        // ====================================================
+        static float maxSmoothWeight = 0.0; 
+        static unsigned long stopTimer = 0; 
+
+        // 현재 저역통과필터된 무게의 최대값 기록
+        if (smoothNetWeight > maxSmoothWeight) {
+          maxSmoothWeight = smoothNetWeight;
+        }
+
+        // 유량이 0.2g/s 이하로 2초간 유지되면 추출이 완전히 끝났다고 판단
+        if (flowRate < 0.2) {
+          if (stopTimer == 0) stopTimer = now; 
+          
+          if (now - stopTimer > NO_FLOW_TIMEOUT) { 
+            currentMode = MODE_NORMAL;
+            // 가속 영향이 완전히 사라진 후 측정된 현재 netWeight를 최종값으로 사용
+            float finalWeight = (netWeight < 0.5) ? 0.0 : netWeight;
+            updateFinalDisplay(finalWeight, elapsedSec); // 최종 결과 화면 표시 (추가 필요)
+            Serial.print("Extraction Finished. Actual Net Weight: ");
+            Serial.println(finalWeight);
+            break; 
+          }
+        } else {
+          stopTimer = 0; // 유량이 다시 증가하면 타이머 초기화
+        }
+
+        // ====================================================
+        // [수정 포인트 3] 화면 갱신 (가속 영향을 줄인 부드러운 값 표시)
+        // ====================================================
+        // 70초 타임아웃 종료
+        if (elapsedSec >= EXTRACT_TIMEOUT) {
           currentMode = MODE_NORMAL;
-          sendDataViaBLE(netWeight, 0, elapsedSec);
+          sendDataViaBLE(smoothNetWeight, 0, elapsedSec);
           break; 
         }
 
+        // 앱 데이터 전송 및 OLED 화면 갱신 (500ms 주기)
         static unsigned long lastSendTime = 0;
         if (now - lastSendTime >= 500) {
+          // 가속 영향을 강력하게 억제한 smoothNetWeight를 앱으로 전송
           sendDataViaBLE(smoothNetWeight, flowRate, elapsedSec);
-          updateExtractDisplay(smoothNetWeight); 
+          // 화면에는 여전히 현재의 대략적인 무게(약간 부드럽게)를 표시
+          updateExtractDisplay(netWeight); 
           
           lastSendTime = now;
         }
         break;
-      }
+      } // case MODE_EXTRACT 종료
       
     } 
 
